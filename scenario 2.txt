@@ -1,0 +1,422 @@
+Scenario 2: smart agriculture system
+
+components required
+esp32
+dht11/22
+screen sd1306
+soil moisture sensor
+buzzer
+pump relay
+leds
+rain sensor
+
+wifi.h connected to wifi
+dht.h used or configure dht11/22
+adafruite used to configure display
+httpclient and webserver use to show data on webpage and store reading on the google sheets
+
+
+
+
+
+#include <WiFi.h>
+#include <DHT.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <HTTPClient.h>
+
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+
+
+#define DHTPIN 4
+#define DHTTYPE DHT22
+#define MQ135_PIN 36
+#define SOIL_PIN 39
+#define RAIN_PIN 34
+#define BUZZER 17
+#define PUMP 5
+#define GREEN_LED 18
+#define BLUE_LED 19
+
+const char* GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbycZFjEB8h5kYogrhnqT6i54A8pYasoaUD-1O8Tk6Pge4Deaayqle0qbEp40_OUKi7enA/exec";
+const unsigned long SHEETS_UPLOAD_INTERVAL = 300; // 5 minutes
+unsigned long lastSheetsUploadTime = 0;
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+
+const char* ssid = "iPhone";
+const char* password = "me768604";
+
+
+DHT dht(DHTPIN, DHTTYPE);
+
+
+WebServer server(80);
+
+
+unsigned long lastReadTime = 0;
+unsigned long lastDisplayUpdate = 0;
+const unsigned long interval = 50; // 50 milliseconds
+const unsigned long displayInterval = 5000; // 5 seconds
+bool buzzerBeeped = false;
+bool pumpState = false;
+
+
+// Function to send data to Google Sheets
+void sendDataToGoogleSheets(float temperature, float humidity, float soilMoisture, int airQuality, bool isRaining, bool pumpStatus) {
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+        
+        // Construct the URL with query parameters
+        String url = String(GOOGLE_SCRIPT_URL) + 
+                     "?temperature=" + String(temperature) +
+                     "&humidity=" + String(humidity) +
+                     "&soilMoisture=" + String(soilMoisture) +
+                     "&airQuality=" + String(airQuality) +
+                     "&isRaining=" + String(isRaining) +
+                     "&pumpStatus=" + String(pumpStatus);
+
+        http.begin(url);
+        
+        int httpResponseCode = http.GET();
+        
+        if (httpResponseCode > 0) {
+            String response = http.getString();
+            Serial.println("Google Sheets Response: " + response);
+        } else {
+            Serial.print("Error sending data to Google Sheets. Error code: ");
+            Serial.println(httpResponseCode);
+        }
+        
+        http.end();
+    }
+}
+
+const char index_html[] PROGMEM = R"rawliteral(
+  <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Garden Dashboard</title>
+    </head>
+<body>
+    <div class="dashboard">
+        <h1>Smart Garden Dashboard</h1>
+        <div class="grid">
+            <div class="card">
+                <h2>Temperature</h2>
+                <div class="chart-container">
+                    <canvas id="tempChart"></canvas>
+                    <div class="status" id="tempValue">--°C</div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Humidity</h2>
+                <div class="chart-container">
+                    <canvas id="humidityChart"></canvas>
+                    <div class="status" id="humidityValue">--%</div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Soil Moisture</h2>
+                <div class="chart-container">
+                    <canvas id="soilChart"></canvas>
+                    <div class="status" id="soilValue">--%</div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Air Quality</h2>
+                <div class="chart-container">
+                    <canvas id="airChart"></canvas>
+                    <div class="status" id="airValue">--</div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Rain Status</h2>
+                <div class="chart-container">
+                    <canvas id="rainChart"></canvas>
+                    <div class="status" id="rainValue">--</div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Pump Status</h2>
+                <div class="chart-container">
+                    <canvas id="pumpChart"></canvas>
+                    <div class="status" id="pumpValue">--</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const createGauge = (canvasId, label, value, max, color) => {
+            return new Chart(document.getElementById(canvasId), {
+                type: 'doughnut',
+                data: {
+                    datasets: [{
+                        data: [value, max - value],
+                        backgroundColor: [color, 'rgba(255, 255, 255, 0.1)'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    circumference: 270,
+                    rotation: -135,
+                    cutout: '80%',
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    animation: {
+                        duration: 1000,
+                        easing: 'easeInOutQuart'
+                    }
+                }
+            });
+        };
+
+        const charts = {
+            temp: createGauge('tempChart', 'Temperature', 0, 100, '#ff6b6b'),
+            humidity: createGauge('humidityChart', 'Humidity', 0, 100, '#4ecdc4'),
+            soil: createGauge('soilChart', 'Soil Moisture', 0, 100, '#45b7d1'),
+            air: createGauge('airChart', 'Air Quality', 0, 4095, '#96ceb4'),
+            rain: createGauge('rainChart', 'Rain Status', 0, 100, '#5d9cec'),
+            pump: createGauge('pumpChart', 'Pump Status', 0, 100, '#ac92ec')
+        };
+
+        const updateDashboard = async () => {
+            try {
+                const response = await fetch('/data');
+                const data = await response.json();
+
+                // Update Temperature
+                charts.temp.data.datasets[0].data = [data.temperature, 100 - data.temperature];
+                charts.temp.update();
+                document.getElementById('tempValue').textContent = ${data.temperature.toFixed(1)}°C;
+
+                // Update Humidity
+                charts.humidity.data.datasets[0].data = [data.humidity, 100 - data.humidity];
+                charts.humidity.update();
+                document.getElementById('humidityValue').textContent = ${data.humidity.toFixed(1)}%;
+
+                // Update Soil Moisture
+                charts.soil.data.datasets[0].data = [data.soilMoisture, 100 - data.soilMoisture];
+                charts.soil.update();
+                document.getElementById('soilValue').textContent = ${data.soilMoisture.toFixed(1)}%;
+
+                // Update Air Quality
+                const airQualityPercentage = (data.airQuality / 4095) * 100;
+                charts.air.data.datasets[0].data = [airQualityPercentage, 100 - airQualityPercentage];
+                charts.air.update();
+                document.getElementById('airValue').textContent = data.airQuality;
+
+                // Update Rain Status
+                charts.rain.data.datasets[0].data = [data.isRaining ? 100 : 0, data.isRaining ? 0 : 100];
+                charts.rain.update();
+                document.getElementById('rainValue').textContent = data.isRaining ? 'YES' : 'NO';
+                
+                // Update Pump Status
+                charts.pump.data.datasets[0].data = [data.pumpStatus ? 100 : 0, data.pumpStatus ? 0 : 100];
+                charts.pump.update();
+                document.getElementById('pumpValue').textContent = data.pumpStatus ? 'ON' : 'OFF';
+
+                // Add pulse animation to cards with significant changes
+                if (data.temperature > 35 || data.soilMoisture < 40 || data.airQuality > 2000) {
+                    document.querySelectorAll('.card').forEach(card => card.classList.add('pulse'));
+                } else {
+                    document.querySelectorAll('.card').forEach(card => card.classList.remove('pulse'));
+                }
+
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        };
+
+        // Update every 2 seconds
+        setInterval(updateDashboard, 2000);
+        // Initial update
+        updateDashboard();
+    </script>
+</body>
+</html>
+)rawliteral";
+
+void displaySensorReadings(float temp, float hum, float soil, int air, bool isRaining) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    
+    // Bold text by drawing twice
+    for (int i = 0; i < 2; i++) {
+        display.setCursor(i, 0);
+        display.print("Temp: ");
+        display.print(temp, 1);
+        display.println("C");
+        
+        display.setCursor(i, 10);
+        display.print("Humidity: ");
+        display.print(hum, 1);
+        display.println("%");
+        
+        display.setCursor(i, 20);
+        display.print("Soil: ");
+        display.print(soil, 1);
+        display.println("%");
+        
+        display.setCursor(i, 30);
+        display.print("Air Q: ");
+        display.println(air);
+        
+        display.setCursor(i, 40);
+        display.println(isRaining ? "Its Raining!" : "Dry");
+        
+        display.setCursor(i, 50);
+        display.print("Pump: ");
+        display.println(pumpState ? "ON" : "OFF");
+    }
+    
+
+void setup() {
+    Serial.begin(115200);
+    
+    display.clearDisplay();
+    displayStartAnimation();
+    
+    dht.begin();
+    
+    pinMode(BUZZER, OUTPUT);
+    pinMode(PUMP, OUTPUT);
+    pinMode(GREEN_LED, OUTPUT);
+    pinMode(BLUE_LED, OUTPUT);
+
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(PUMP, LOW);
+    digitalWrite(BLUE_LED, LOW);
+
+    WiFi.begin(ssid, password);
+    displayWiFiStatus(false);
+    
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    
+    displayWiFiStatus(true);
+    delay(2000);
+    
+    Serial.println("\nConnected to WiFi");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // Setup web server routes
+    server.on("/", HTTP_GET, []() {
+        server.send(200, "text/html", index_html);
+    });
+
+    server.on("/data", HTTP_GET, []() {
+        StaticJsonDocument<200> doc;
+        
+        float temp = dht.readTemperature();
+        float hum = dht.readHumidity();
+        int airQuality = analogRead(MQ135_PIN);
+        int soilAnalog = analogRead(SOIL_PIN);
+        int rainAnalog = analogRead(RAIN_PIN);
+        float soilMoisture = 100 - ((soilAnalog * 100.0) / 4095.0);
+
+        doc["temperature"] = temp;
+        doc["humidity"] = hum;
+        doc["soilMoisture"] = soilMoisture;
+        doc["airQuality"] = airQuality;
+        doc["isRaining"] = rainAnalog < 3000;
+        doc["pumpStatus"] = pumpState;
+
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json", response);
+    });
+    server.begin();
+    Serial.println("HTTP server started");
+}
+
+void loop() {
+    server.handleClient();
+    unsigned long currentTime = millis();
+    if (currentTime - lastReadTime >= interval) {
+        lastReadTime = currentTime;
+        float temp = dht.readTemperature();
+        float hum = dht.readHumidity();
+        int airQuality = analogRead(MQ135_PIN);
+        int soilAnalog = analogRead(SOIL_PIN);
+        int rainAnalog = analogRead(RAIN_PIN);
+        float soilMoisture = 100 - ((soilAnalog * 100.0) / 4095.0);
+        bool isRaining = rainAnalog < 3000;
+        if (currentTime - lastDisplayUpdate >= displayInterval) {
+            lastDisplayUpdate = currentTime;
+            displaySensorReadings(temp, hum, soilMoisture, airQuality, isRaining);
+        }
+        Serial.print("Temp: "); Serial.print(temp); Serial.print("°C | ");
+        Serial.print("Humidity: "); Serial.print(hum); Serial.print("% | ");
+        Serial.print("Air Quality: "); Serial.print(airQuality); Serial.print(" | ");
+        Serial.print("Soil Moisture: "); Serial.print(soilMoisture); Serial.print("% | ");
+        Serial.print("Rain Analog: "); Serial.println(rainAnalog);
+        if (currentTime - lastSheetsUploadTime >= SHEETS_UPLOAD_INTERVAL) {
+            sendDataToGoogleSheets(temp, hum, soilMoisture, airQuality, isRaining, pumpState);
+            lastSheetsUploadTime = currentTime;
+        }
+        if (soilMoisture < 40 && rainAnalog >= 3000 && !pumpState) {
+            Serial.println("Pump ON due to dry soil");
+            digitalWrite(BUZZER, HIGH);
+            delay(500);
+            digitalWrite(BUZZER, LOW);
+            digitalWrite(PUMP, HIGH);
+            digitalWrite(BLUE_LED, HIGH);
+            pumpState = true;
+            displaySensorReadings(temp, hum, soilMoisture, airQuality, isRaining);
+        } else if (rainAnalog < 3000 || soilMoisture >= 40) {
+            if (pumpState) {
+                digitalWrite(PUMP, LOW);
+                digitalWrite(BLUE_LED, LOW);
+                Serial.println("Pump turned OFF");
+                pumpState = false;
+                displaySensorReadings(temp, hum, soilMoisture, airQuality, isRaining);
+            }
+        }
+        if (temp > 35) {
+            if (!buzzerBeeped) {
+                digitalWrite(BUZZER, HIGH);
+                delay(3000);
+                digitalWrite(BUZZER, LOW);
+                buzzerBeeped = true;
+            }
+            digitalWrite(PUMP, HIGH);
+            digitalWrite(BLUE_LED, HIGH);
+            delay(10000);
+            digitalWrite(PUMP, LOW);
+            digitalWrite(BLUE_LED, LOW);
+        }
+        if (airQuality > 2000) {
+            if (!buzzerBeeped) {
+                digitalWrite(BUZZER, HIGH);
+                delay(3000);
+                digitalWrite(BUZZER, LOW);
+                buzzerBeeped = true;
+            }
+            digitalWrite(PUMP, HIGH);
+            digitalWrite(BLUE_LED, HIGH);
+            delay(10000);
+            digitalWrite(PUMP, LOW);
+            digitalWrite(BLUE_LED, LOW);
+        }
+        if (temp <= 35 && airQuality <= 2000) {
+            buzzerBeeped = false;
+        }
+    }
+}

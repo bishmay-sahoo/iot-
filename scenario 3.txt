@@ -1,0 +1,68 @@
+Scenario 3: smart city
+ESP32
+DHT11/DHT22 Sensor
+MQ135 Gas Sensor
+Sound Sensor Module
+LDR Sensor
+Jumper Wire
+Breadboard
+
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <DHT.h>
+
+#define DHTPIN 4         
+#define DHTTYPE DHT11    
+DHT dht(DHTPIN, DHTTYPE);
+
+const char* ssid = "wifiname";
+const char* password = "password";
+const char* googleScriptURL = "goooglesheetlink";
+int mq135Pin = 34;
+int soundSensorPin = 35;
+int ldrPin = 32;
+WiFiServer server(80);
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  WiFi.begin(ssid, password);
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting...");
+  }
+  Serial.println("Connected to WiFi");
+  server.begin();
+}
+void loop() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  int airQuality = analogRead(mq135Pin);
+  int soundLevel = analogRead(soundSensorPin);
+  int lightIntensity = analogRead(ldrPin);
+  WiFiClient client = server.available();
+  if (client) {
+    String html = "<!DOCTYPE html><html><head><title>Smart City Dashboard</title></head><body>";
+    html += "<h1>Smart City Monitoring System</h1>";
+    html += "<p>Temperature: " + String(temp) + " C</p>";
+    html += "<p>Humidity: " + String(hum) + " %</p>";
+    html += "<p>Air Quality: " + String(airQuality) + "</p>";
+    html += "<p>Noise Level: " + String(soundLevel) + "</p>";
+    html += "<p>Light Intensity: " + String(lightIntensity) + "</p>";
+    html += "</body></html>";
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-type:text/html");
+    client.println();
+    client.println(html);
+    client.println();
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = googleScriptURL + "?temp=" + temp + "&hum=" + hum + "&air=" + airQuality + "&sound=" + soundLevel + "&light=" + lightIntensity;
+    http.begin(url);
+    int httpResponseCode = http.GET();
+    http.end();
+  }
+  delay(10000);
+}
